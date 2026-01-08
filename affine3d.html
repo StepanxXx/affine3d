@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>3D Affine (pure JS)</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#0b0f14; color:#d9e2ef; font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    /* Canvas прев’ю інколи дає 0-height для 100%, тому фіксуємо viewport */
+    body { height: 100vh; }
+    #wrap { display:flex; height:100vh; width:100vw; }
+
+    #ui {
+      width: 360px; padding: 14px; box-sizing:border-box; border-right: 1px solid #1d2633;
+      background: #0e141d;
+      overflow:auto;
+    }
+    #ui h2 { margin: 0 0 10px; font-size: 16px; }
+    .group { margin: 10px 0 14px; padding: 10px; border: 1px solid #1d2633; border-radius: 10px; background:#0b111a; }
+    .row { display:grid; grid-template-columns: 68px 1fr 70px; gap: 10px; align-items:center; margin: 6px 0; }
+    .row label { opacity: .9; }
+    input[type="range"] { width:100%; }
+    input[type="number"] { width: 70px; padding: 4px 6px; background:#0e141d; border:1px solid #223047; color:#d9e2ef; border-radius: 8px; }
+    button {
+      width:100%; margin-top: 8px; padding: 10px 12px; border-radius: 10px; border:1px solid #223047;
+      background:#101a28; color:#d9e2ef; cursor:pointer;
+    }
+    button:hover { background:#122036; }
+    .hint { font-size: 12px; opacity: .75; margin-top: 10px; }
+
+    #stage { position: relative; flex:1; min-width: 0; }
+    canvas { display:block; width:100%; height:100%; }
+
+    #status {
+      position:absolute; top: 12px; right: 12px;
+      padding: 8px 10px; border-radius: 10px;
+      background: rgba(14,20,29,.75);
+      border: 1px solid #223047;
+      font-size: 12px;
+      max-width: 45vw;
+      white-space: pre-wrap;
+    }
+    #status b { font-weight: 700; }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <div id="ui">
+    <h2>3D афінні перетворення</h2>
+
+    <div class="group">
+      <div><b>Translate</b></div>
+      <div class="row"><label>Tx</label><input id="tx" type="range" min="-5" max="5" step="0.01" value="0"><input id="tx_n" type="number" step="0.01" value="0"></div>
+      <div class="row"><label>Ty</label><input id="ty" type="range" min="-5" max="5" step="0.01" value="0"><input id="ty_n" type="number" step="0.01" value="0"></div>
+      <div class="row"><label>Tz</label><input id="tz" type="range" min="-10" max="2" step="0.01" value="-4"><input id="tz_n" type="number" step="0.01" value="-4"></div>
+    </div>
+
+    <div class="group">
+      <div><b>Rotate (deg)</b></div>
+      <div class="row"><label>Rx</label><input id="rx" type="range" min="-180" max="180" step="1" value="20"><input id="rx_n" type="number" step="1" value="20"></div>
+      <div class="row"><label>Ry</label><input id="ry" type="range" min="-180" max="180" step="1" value="35"><input id="ry_n" type="number" step="1" value="35"></div>
+      <div class="row"><label>Rz</label><input id="rz" type="range" min="-180" max="180" step="1" value="0"><input id="rz_n" type="number" step="1" value="0"></div>
+    </div>
+
+    <div class="group">
+      <div><b>Scale</b></div>
+      <div class="row"><label>Sx</label><input id="sx" type="range" min="0.1" max="3" step="0.01" value="1"><input id="sx_n" type="number" step="0.01" value="1"></div>
+      <div class="row"><label>Sy</label><input id="sy" type="range" min="0.1" max="3" step="0.01" value="1"><input id="sy_n" type="number" step="0.01" value="1"></div>
+      <div class="row"><label>Sz</label><input id="sz" type="range" min="0.1" max="3" step="0.01" value="1"><input id="sz_n" type="number" step="0.01" value="1"></div>
+    </div>
+
+    <div class="group">
+      <div><b>Shear</b> (зсув осей)</div>
+      <div class="row"><label>XY</label><input id="shxy" type="range" min="-1" max="1" step="0.01" value="0"><input id="shxy_n" type="number" step="0.01" value="0"></div>
+      <div class="row"><label>XZ</label><input id="shxz" type="range" min="-1" max="1" step="0.01" value="0"><input id="shxz_n" type="number" step="0.01" value="0"></div>
+      <div class="row"><label>YZ</label><input id="shyz" type="range" min="-1" max="1" step="0.01" value="0"><input id="shyz_n" type="number" step="0.01" value="0"></div>
+    </div>
+
+    <button id="reset">Reset</button>
+    <div class="hint">
+      Пайплайн: <code>M = T · Rz · Ry · Rx · Shear · S</code>, далі <code>MVP = P · V · M</code>.<br/>
+      Якщо WebGL2 недоступний у Canvas-прев’ю — вмикається fallback на Canvas2D (wireframe), щоб все одно бачити результат.
+    </div>
+  </div>
+
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="status"><b>Init…</b></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const statusEl = document.getElementById('status');
+  const setStatus = (title, details = '') => {
+    statusEl.innerHTML = `<b>${title}</b>${details ? `
+${details}` : ''}`;
+  };
+
+  // ---------- Minimal mat4 (column-major, OpenGL style) ----------
+  const Mat4 = {
+    I() { return new Float32Array([1,0,0,0,  0,1,0,0,  0,0,1,0,  0,0,0,1]); },
+    mul(a,b){ // a*b
+      const o = new Float32Array(16);
+      for (let c=0;c<4;c++){
+        for (let r=0;r<4;r++){
+          o[c*4+r] =
+            a[0*4+r]*b[c*4+0] +
+            a[1*4+r]*b[c*4+1] +
+            a[2*4+r]*b[c*4+2] +
+            a[3*4+r]*b[c*4+3];
+        }
+      }
+      return o;
+    },
+    translate(tx,ty,tz){
+      const m = Mat4.I();
+      m[12]=tx; m[13]=ty; m[14]=tz;
+      return m;
+    },
+    scale(sx,sy,sz){
+      const m = Mat4.I();
+      m[0]=sx; m[5]=sy; m[10]=sz;
+      return m;
+    },
+    rotX(rad){
+      const c=Math.cos(rad), s=Math.sin(rad);
+      return new Float32Array([1,0,0,0,  0,c,s,0,  0,-s,c,0,  0,0,0,1]);
+    },
+    rotY(rad){
+      const c=Math.cos(rad), s=Math.sin(rad);
+      return new Float32Array([c,0,-s,0,  0,1,0,0,  s,0,c,0,  0,0,0,1]);
+    },
+    rotZ(rad){
+      const c=Math.cos(rad), s=Math.sin(rad);
+      return new Float32Array([c,s,0,0,  -s,c,0,0,  0,0,1,0,  0,0,0,1]);
+    },
+    shearXY_XZ_YZ(shxy, shxz, shyz){
+      // x' = x + shxy*y + shxz*z
+      // y' = y + shyz*z
+      // z' = z
+      const m = Mat4.I();
+      m[4]  = shxy; // x from y
+      m[8]  = shxz; // x from z
+      m[9]  = shyz; // y from z
+      return m;
+    },
+    perspective(fovyRad, aspect, near, far){
+      const f = 1 / Math.tan(fovyRad/2);
+      const nf = 1/(near - far);
+      const m = new Float32Array(16);
+      m[0]=f/aspect; m[5]=f; m[10]=(far+near)*nf; m[11]=-1;
+      m[14]=2*far*near*nf;
+      return m;
+    },
+    lookAt(eye, target, up){
+      // Стандартний right-handed lookAt (column-major, column vectors)
+      const ex = eye[0], ey = eye[1], ez = eye[2];
+      const tx = target[0], ty = target[1], tz = target[2];
+
+      // f = normalize(target - eye)
+      let fx = tx - ex, fy = ty - ey, fz = tz - ez;
+      let fl = Math.hypot(fx, fy, fz);
+      if (fl === 0) fl = 1;
+      fx /= fl; fy /= fl; fz /= fl;
+
+      // s = normalize(cross(f, up))
+      let sx = fy*up[2] - fz*up[1];
+      let sy = fz*up[0] - fx*up[2];
+      let sz = fx*up[1] - fy*up[0];
+      let sl = Math.hypot(sx, sy, sz);
+      if (sl === 0) sl = 1;
+      sx /= sl; sy /= sl; sz /= sl;
+
+      // u = cross(s, f)
+      const ux = sy*fz - sz*fy;
+      const uy = sz*fx - sx*fz;
+      const uz = sx*fy - sy*fx;
+
+      // Column-major view matrix:
+      // [ s.x  u.x  -f.x  0 ]
+      // [ s.y  u.y  -f.y  0 ]
+      // [ s.z  u.z  -f.z  0 ]
+      // [ -dot(s,eye) -dot(u,eye) dot(f,eye) 1 ]
+      const m = new Float32Array(16);
+      m[0] = sx;  m[4] = ux;  m[8]  = -fx; m[12] = 0;
+      m[1] = sy;  m[5] = uy;  m[9]  = -fy; m[13] = 0;
+      m[2] = sz;  m[6] = uz;  m[10] = -fz; m[14] = 0;
+      m[3] = 0;   m[7] = 0;   m[11] = 0;   m[15] = 1;
+
+      const txe = -(sx*ex + sy*ey + sz*ez);
+      const tye = -(ux*ex + uy*ey + uz*ez);
+      const tze =  (fx*ex + fy*ey + fz*ez);
+
+      m[12] = txe;
+      m[13] = tye;
+      m[14] = tze;
+      return m;
+    },
+    transformVec4(m, x,y,z,w){
+      // column-major: v' = M * v
+      return [
+        m[0]*x + m[4]*y + m[8]*z  + m[12]*w,
+        m[1]*x + m[5]*y + m[9]*z  + m[13]*w,
+        m[2]*x + m[6]*y + m[10]*z + m[14]*w,
+        m[3]*x + m[7]*y + m[11]*z + m[15]*w,
+      ];
+    },
+    normalMat3FromMat4(m4){
+      // Inverse-transpose of upper-left 3x3 (handles non-uniform scale/shear)
+      const a = m4[0], b = m4[4], c = m4[8];
+      const d = m4[1], e = m4[5], f = m4[9];
+      const g = m4[2], h = m4[6], i = m4[10];
+
+      const det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g);
+      if (Math.abs(det) < 1e-8) {
+        return new Float32Array([1,0,0, 0,1,0, 0,0,1]);
+      }
+      const invDet = 1.0 / det;
+
+      // inverse (row-major)
+      const inv00 =  (e*i - f*h) * invDet;
+      const inv01 =  (c*h - b*i) * invDet;
+      const inv02 =  (b*f - c*e) * invDet;
+
+      const inv10 =  (f*g - d*i) * invDet;
+      const inv11 =  (a*i - c*g) * invDet;
+      const inv12 =  (c*d - a*f) * invDet;
+
+      const inv20 =  (d*h - e*g) * invDet;
+      const inv21 =  (b*g - a*h) * invDet;
+      const inv22 =  (a*e - b*d) * invDet;
+
+      // normalMat = transpose(inverse), packed column-major mat3
+      return new Float32Array([
+        inv00, inv01, inv02,
+        inv10, inv11, inv12,
+        inv20, inv21, inv22,
+      ]);
+    }
+  };
+
+  // ---------- UI wiring ----------
+  const ids = ['tx','ty','tz','rx','ry','rz','sx','sy','sz','shxy','shxz','shyz'];
+  const state = Object.fromEntries(ids.map(k => [k, 0]));
+  function bindPair(id){
+    const r = document.getElementById(id);
+    const n = document.getElementById(id + '_n');
+    const sync = (v) => { r.value = v; n.value = v; state[id] = parseFloat(v); };
+    r.addEventListener('input', e => sync(e.target.value));
+    n.addEventListener('input', e => sync(e.target.value));
+    sync(r.value);
+  }
+  ids.forEach(bindPair);
+
+  document.getElementById('reset').addEventListener('click', () => {
+    const preset = { tx:0,ty:0,tz:-4, rx:20,ry:35,rz:0, sx:1,sy:1,sz:1, shxy:0,shxz:0,shyz:0 };
+    for (const k of ids){
+      const v = preset[k];
+      document.getElementById(k).value = v;
+      document.getElementById(k+'_n').value = v;
+      state[k] = v;
+    }
+  });
+
+  function deg2rad(d){ return d*Math.PI/180; }
+
+  // ---------- Shared camera/matrices ----------
+  function buildMatrices(canvas){
+    const aspect = canvas.width / canvas.height;
+    const P = Mat4.perspective(deg2rad(55), aspect, 0.1, 100.0);
+    const V = Mat4.lookAt([0, 0.8, 5.5], [0,0,0], [0,1,0]);
+
+    const T  = Mat4.translate(state.tx, state.ty, state.tz);
+    const Rx = Mat4.rotX(deg2rad(state.rx));
+    const Ry = Mat4.rotY(deg2rad(state.ry));
+    const Rz = Mat4.rotZ(deg2rad(state.rz));
+    const S  = Mat4.scale(state.sx, state.sy, state.sz);
+    const Sh = Mat4.shearXY_XZ_YZ(state.shxy, state.shxz, state.shyz);
+
+    // M = T · Rz · Ry · Rx · Sh · S
+    const M = Mat4.mul(T, Mat4.mul(Rz, Mat4.mul(Ry, Mat4.mul(Rx, Mat4.mul(Sh, S)))));
+    const MVP = Mat4.mul(P, Mat4.mul(V, M));
+    const MVPaxes = Mat4.mul(P, V);
+
+    return { P, V, M, MVP, MVPaxes };
+  }
+
+  // ---------- Resize helper ----------
+  const canvas = document.getElementById('c');
+  function resize(){
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const w = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+    const h = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h){
+      canvas.width = w; canvas.height = h;
+    }
+  }
+  window.addEventListener('resize', () => resize());
+
+  // ---------- Try WebGL2 first; fallback to Canvas2D ----------
+  function tryInitWebGL2(){
+    const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
+    if (!gl) return null;
+
+    const vs = `#version 300 es
+  in vec3 aPos;
+  in vec3 aCol;
+  in vec3 aNrm;
+
+  uniform mat4 uMVP;
+  uniform mat4 uModelView;
+  uniform mat3 uNormalMat;
+
+  out vec3 vCol;
+  out vec3 vNrm;
+  out vec3 vPosView;
+
+  void main(){
+    vCol = aCol;
+    vPosView = (uModelView * vec4(aPos, 1.0)).xyz;
+    vNrm = normalize(uNormalMat * aNrm);
+    gl_Position = uMVP * vec4(aPos, 1.0);
+  }`;
+
+    const fs = `#version 300 es
+  precision highp float;
+
+  in vec3 vCol;
+  in vec3 vNrm;
+  in vec3 vPosView;
+
+  uniform vec3 uLightDirView;
+  uniform float uAmbient;
+  uniform float uDiffuse;
+  uniform float uSpecular;
+  uniform float uShininess;
+  uniform float uUnlit;
+
+  out vec4 o;
+
+  void main(){
+    if (uUnlit > 0.5) {
+      o = vec4(vCol, 1.0);
+      return;
+    }
+
+    vec3 N = normalize(vNrm);
+    vec3 L = normalize(uLightDirView);
+    vec3 V = normalize(-vPosView);
+
+    float diff = max(dot(N, L), 0.0);
+    vec3 H = normalize(L + V);
+    float spec = pow(max(dot(N, H), 0.0), uShininess);
+
+    vec3 color = vCol * (uAmbient + uDiffuse * diff) + vec3(uSpecular * spec);
+    o = vec4(color, 1.0);
+  }`;
+
+    function compile(type, src){
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+        const msg = gl.getShaderInfoLog(s) || 'shader compile error';
+        gl.deleteShader(s);
+        throw new Error(msg);
+      }
+      return s;
+    }
+    function program(vsSrc, fsSrc){
+      const p = gl.createProgram();
+      gl.attachShader(p, compile(gl.VERTEX_SHADER, vsSrc));
+      gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)){
+        const msg = gl.getProgramInfoLog(p) || 'program link error';
+        gl.deleteProgram(p);
+        throw new Error(msg);
+      }
+      return p;
+    }
+
+    const prog = program(vs, fs);
+    gl.useProgram(prog);
+
+    const locMVP = gl.getUniformLocation(prog, 'uMVP');
+    const locMV  = gl.getUniformLocation(prog, 'uModelView');
+    const locNrm = gl.getUniformLocation(prog, 'uNormalMat');
+
+    const locLightDir = gl.getUniformLocation(prog, 'uLightDirView');
+    const locAmbient  = gl.getUniformLocation(prog, 'uAmbient');
+    const locDiffuse  = gl.getUniformLocation(prog, 'uDiffuse');
+    const locSpecular = gl.getUniformLocation(prog, 'uSpecular');
+    const locShine    = gl.getUniformLocation(prog, 'uShininess');
+    const locUnlit    = gl.getUniformLocation(prog, 'uUnlit');
+
+    // Lighting defaults (підібрано для "читабельних" деформацій)
+    gl.uniform3f(locLightDir, 0.35, 0.75, 0.55);
+    gl.uniform1f(locAmbient, 0.22);
+    gl.uniform1f(locDiffuse, 0.95);
+    gl.uniform1f(locSpecular, 0.25);
+    gl.uniform1f(locShine, 48.0);
+    gl.uniform1f(locUnlit, 0.0);
+
+    // Geometry (interleaved): pos3 + col3 + nrm3
+
+    function pushTri(out, p0,p1,p2, col, nrm){
+      out.push(
+        p0[0],p0[1],p0[2],  col[0],col[1],col[2],  nrm[0],nrm[1],nrm[2],
+        p1[0],p1[1],p1[2],  col[0],col[1],col[2],  nrm[0],nrm[1],nrm[2],
+        p2[0],p2[1],p2[2],  col[0],col[1],col[2],  nrm[0],nrm[1],nrm[2],
+      );
+    }
+
+    function buildCubeLit(){
+      const out = [];
+      const col = [0.80, 0.90, 1.00];
+
+      const p = {
+        nnn: [-0.5,-0.5,-0.5], pnn: [ 0.5,-0.5,-0.5], ppn: [ 0.5, 0.5,-0.5], npn: [-0.5, 0.5,-0.5],
+        nnp: [-0.5,-0.5, 0.5], pnp: [ 0.5,-0.5, 0.5], ppp: [ 0.5, 0.5, 0.5], npp: [-0.5, 0.5, 0.5],
+      };
+
+      // +Z (front)
+      pushTri(out, p.nnp, p.pnp, p.ppp, col, [0,0,1]);
+      pushTri(out, p.nnp, p.ppp, p.npp, col, [0,0,1]);
+
+      // -Z (back)
+      pushTri(out, p.nnn, p.ppn, p.pnn, col, [0,0,-1]);
+      pushTri(out, p.nnn, p.npn, p.ppn, col, [0,0,-1]);
+
+      // -X (left)
+      pushTri(out, p.nnn, p.npp, p.npn, col, [-1,0,0]);
+      pushTri(out, p.nnn, p.nnp, p.npp, col, [-1,0,0]);
+
+      // +X (right)
+      pushTri(out, p.pnn, p.ppn, p.ppp, col, [1,0,0]);
+      pushTri(out, p.pnn, p.ppp, p.pnp, col, [1,0,0]);
+
+      // +Y (top)
+      pushTri(out, p.npn, p.npp, p.ppp, col, [0,1,0]);
+      pushTri(out, p.npn, p.ppp, p.ppn, col, [0,1,0]);
+
+      // -Y (bottom)
+      pushTri(out, p.nnn, p.pnp, p.nnp, col, [0,-1,0]);
+      pushTri(out, p.nnn, p.pnn, p.pnp, col, [0,-1,0]);
+
+      return out;
+    }
+
+    const cube = buildCubeLit();
+
+    // Axes: unlit, normals can be any constant (use +Z)
+    const axes = [
+      0,0,0,   1,0.25,0.25,  0,0,1,
+      2,0,0,   1,0.25,0.25,  0,0,1,
+      0,0,0,   0.25,1,0.25,  0,0,1,
+      0,2,0,   0.25,1,0.25,  0,0,1,
+      0,0,0,   0.25,0.65,1,  0,0,1,
+      0,0,2,   0.25,0.65,1,  0,0,1,
+    ];
+
+    function makeVAO(interleaved){
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(interleaved), gl.STATIC_DRAW);
+
+      const stride = 9 * 4;
+      const locPos = gl.getAttribLocation(prog, 'aPos');
+      const locCol = gl.getAttribLocation(prog, 'aCol');
+      const locNrmAttr = gl.getAttribLocation(prog, 'aNrm');
+
+      gl.enableVertexAttribArray(locPos);
+      gl.vertexAttribPointer(locPos, 3, gl.FLOAT, false, stride, 0);
+
+      gl.enableVertexAttribArray(locCol);
+      gl.vertexAttribPointer(locCol, 3, gl.FLOAT, false, stride, 3*4);
+
+      gl.enableVertexAttribArray(locNrmAttr);
+      gl.vertexAttribPointer(locNrmAttr, 3, gl.FLOAT, false, stride, 6*4);
+
+      gl.bindVertexArray(null);
+      return { vao, count: interleaved.length / 9 };
+    }
+
+    const cubeVAO = makeVAO(cube);
+    const axesVAO = makeVAO(axes);
+
+    gl.enable(gl.DEPTH_TEST);
+
+    return {
+      gl, prog,
+      locMVP, locMV, locNrm,
+      locLightDir, locAmbient, locDiffuse, locSpecular, locShine, locUnlit,
+      cubeVAO, axesVAO
+    };
+  }
+
+  function runWebGL2(ctx){
+    const {
+      gl,
+      locMVP, locMV, locNrm,
+      locUnlit,
+      cubeVAO, axesVAO
+    } = ctx;
+
+    setStatus('Render: WebGL2', 'OK • Lighting: directional + ambient + specular');
+
+    function frame(){
+      resize();
+      gl.viewport(0,0,canvas.width,canvas.height);
+      gl.clearColor(0.04, 0.06, 0.08, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      const { MVP, MVPaxes, V, M } = buildMatrices(canvas);
+
+      // Cube: lit
+      const MV = Mat4.mul(V, M);
+      const normalMat = Mat4.normalMat3FromMat4(MV);
+
+      gl.uniform1f(locUnlit, 0.0);
+      gl.uniformMatrix4fv(locMVP, false, MVP);
+      gl.uniformMatrix4fv(locMV, false, MV);
+      gl.uniformMatrix3fv(locNrm, false, normalMat);
+
+      gl.bindVertexArray(cubeVAO.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, cubeVAO.count);
+
+      // Axes: unlit
+      gl.uniform1f(locUnlit, 1.0);
+      gl.uniformMatrix4fv(locMVP, false, MVPaxes);
+      gl.uniformMatrix4fv(locMV, false, V);
+      gl.uniformMatrix3fv(locNrm, false, Mat4.normalMat3FromMat4(V));
+
+      gl.bindVertexArray(axesVAO.vao);
+      gl.drawArrays(gl.LINES, 0, axesVAO.count);
+
+      requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  function runCanvas2D(){
+    const ctx = canvas.getContext('2d', { alpha: false });
+    setStatus('Render: Canvas2D fallback', 'WebGL2 недоступний у цьому середовищі');
+
+    const cubeVerts = [
+      [-0.5,-0.5,-0.5], [0.5,-0.5,-0.5], [0.5,0.5,-0.5], [-0.5,0.5,-0.5],
+      [-0.5,-0.5, 0.5], [0.5,-0.5, 0.5], [0.5,0.5, 0.5], [-0.5,0.5, 0.5],
+    ];
+    const edges = [
+      [0,1],[1,2],[2,3],[3,0],
+      [4,5],[5,6],[6,7],[7,4],
+      [0,4],[1,5],[2,6],[3,7],
+    ];
+
+    const axes = [
+      { a:[0,0,0], b:[2,0,0], c:'#ff4d4d' },
+      { a:[0,0,0], b:[0,2,0], c:'#4dff4d' },
+      { a:[0,0,0], b:[0,0,2], c:'#4da6ff' },
+    ];
+
+    function project(mvp, p){
+      const [x,y,z] = p;
+      const [cx,cy,cz,cw] = Mat4.transformVec4(mvp, x,y,z,1);
+      if (cw === 0) return null;
+      const ndcX = cx / cw;
+      const ndcY = cy / cw;
+      const ndcZ = cz / cw;
+      const sx = (ndcX * 0.5 + 0.5) * canvas.width;
+      const sy = (1 - (ndcY * 0.5 + 0.5)) * canvas.height;
+      return { x:sx, y:sy, z:ndcZ };
+    }
+
+    function frame(){
+      resize();
+
+      // background
+      ctx.fillStyle = '#0b0f14';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+
+      const { MVP, MVPaxes } = buildMatrices(canvas);
+
+      // axes
+      ctx.lineWidth = 2;
+      for (const ax of axes){
+        const p1 = project(MVPaxes, ax.a);
+        const p2 = project(MVPaxes, ax.b);
+        if (!p1 || !p2) continue;
+        ctx.strokeStyle = ax.c;
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+      }
+
+      // cube wireframe
+      const pts = cubeVerts.map(v => project(MVP, v));
+      ctx.strokeStyle = 'rgba(217,226,239,0.9)';
+      ctx.lineWidth = 2;
+      for (const [i,j] of edges){
+        const a = pts[i], b = pts[j];
+        if (!a || !b) continue;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      // small origin dot
+      const o = project(MVPaxes, [0,0,0]);
+      if (o){
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.beginPath();
+        ctx.arc(o.x, o.y, 3, 0, Math.PI*2);
+        ctx.fill();
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- Boot ----------
+  try {
+    resize();
+    const webgl = tryInitWebGL2();
+    if (webgl) {
+      runWebGL2(webgl);
+    } else {
+      runCanvas2D();
+    }
+  } catch (e) {
+    setStatus('Runtime error', String(e && e.message ? e.message : e));
+    // guaranteed fallback
+    try { runCanvas2D(); } catch (_) {}
+  }
+})();
+</script>
+</body>
+</html>
